@@ -25,7 +25,7 @@
 # Function to print usage
 usage() {
     cat <<EOF
-Usage: $0 --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [--validity-days <VALIDITY_DAYS>] [--output <OUTPUT_FORMAT>] [--cert-email <CERT_EMAIL>] [--cert-san <CERT_SAN>] [--google-play-store-spec]
+Usage: $0 --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [--validity-days <VALIDITY_DAYS>] [--output <OUTPUT_FORMAT>] [--cert-email <CERT_EMAIL>] [--cert-san <CERT_SAN>]
 
 Required arguments:
   --kms-key-id, -k          The ID of the KMS key to use for signing.
@@ -44,7 +44,6 @@ Optional arguments:
   --cert-org-unit           The organizational unit name (OU) for the certificate.
   --cert-email              The email address for the certificate.
   --cert-san                The subject alternative name (SAN) for the certificate. This option can be repeated.
-  --google-play-store-spec  Ensure the key type is RSA for Google Play Store compatibility.
 
 Output options:
   -                                        Output the certificate to stdout (not in JSON format).
@@ -87,7 +86,6 @@ handle_error() {
 VALIDITY_DAYS="${VALIDITY_DAYS:-9125}"  # 25 years
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-file:self_signed_certificate.pem}"
 EXPIRY_THRESHOLD_DAYS=90
-GOOGLE_PLAY_STORE_SPEC=false
 CERT_SAN=()
 
 # Parse command line arguments
@@ -187,10 +185,6 @@ while [[ "$#" -gt 0 ]]; do
             CERT_SAN+=("$2")
             shift 2
             ;;
-        --google-play-store-spec)
-            GOOGLE_PLAY_STORE_SPEC=true
-            shift
-            ;;
         --help|-h)
             usage
             exit 0
@@ -239,26 +233,12 @@ create_temp_dir() {
     trap "rm -rf $TEMP_DIR" EXIT
 }
 
-# Function to validate the key type for Google Play Store compatibility
-validate_google_play_store_spec() {
-    if $GOOGLE_PLAY_STORE_SPEC; then
-        echo "Validating Google Play Store specification..."
-        KEY_METADATA=$(aws kms describe-key --key-id "$KMS_KEY_ID") || handle_error "Failed to describe KMS key"
-        KEY_SPEC=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeySpec')
-        if [[ "$KEY_SPEC" != RSA_* ]]; then
-            handle_error "Google Play Store requires an RSA key. Current key type is $KEY_SPEC."
-        fi
-    fi
-}
-
 # Main script logic
 main() {
     check_openssl
     check_jq
     check_curl
     create_temp_dir
-
-    validate_google_play_store_spec
 
     # Retrieve public key and key spec from AWS KMS
     echo "Retrieving public key and key spec from AWS KMS..."

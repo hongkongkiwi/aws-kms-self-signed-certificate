@@ -2,13 +2,30 @@
 
 This script generates a self-signed certificate using an AWS KMS key. The generated certificate can be saved to a local file, AWS SSM Parameter Store, AWS Secrets Manager, S3 bucket, HTTP(S) endpoint, SQS, SNS, DynamoDB, or output as JSON. The script supports RSA and ECC keys and dynamically selects the appropriate signing algorithm based on the KMS key's specifications.
 
+## Table of Contents
+
+- [Self-Signed Certificate Generator Using AWS KMS](#self-signed-certificate-generator-using-aws-kms)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Prerequisites](#prerequisites)
+  - [Required IAM Permissions](#required-iam-permissions)
+  - [Usage](#usage)
+    - [Required Arguments](#required-arguments)
+    - [Optional Arguments](#optional-arguments)
+    - [Output Options](#output-options)
+  - [Examples](#examples)
+    - [Generate a certificate and save it to a local file](#generate-a-certificate-and-save-it-to-a-local-file)
+    - [Generate a certificate and output it as JSON to stdout](#generate-a-certificate-and-output-it-as-json-to-stdout)
+    - [Generate a certificate and save it to AWS SSM Parameter Store](#generate-a-certificate-and-save-it-to-aws-ssm-parameter-store)
+    - [Generate a certificate and post it to an HTTP endpoint](#generate-a-certificate-and-post-it-to-an-http-endpoint)
+  - [License](#license)
+
 ## Features
 
 - Supports RSA and ECC keys
 - Dynamically selects the appropriate signing algorithm based on KMS key specifications
 - Multiple output formats, including local file, JSON, AWS SSM Parameter Store, AWS Secrets Manager, S3 bucket, HTTP(S) endpoint, SQS, SNS, and DynamoDB
 - Optionally sets certificate details such as country, state, locality, organization, organizational unit, email, and subject alternative names (SANs)
-- Ensures Google Play Store compatibility with RSA keys
 
 ## Prerequisites
 
@@ -37,7 +54,7 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 ## Usage
 
 ```
-./generate_self_signed_cert.sh --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [OPTIONS]
+./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [OPTIONS]
 ```
 
 ### Required Arguments
@@ -56,7 +73,6 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 - `--cert-org-unit`: The organizational unit name (OU) for the certificate.
 - `--cert-email`: The email address for the certificate.
 - `--cert-san`: The subject alternative name (SAN) for the certificate. This option can be repeated.
-- `--google-play-store-spec`: Ensure the key type is RSA for Google Play Store compatibility.
 
 ### Output Options
 
@@ -88,25 +104,25 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 ### Generate a certificate and save it to a local file
 
 ```
-./generate_self_signed_cert.sh --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output file:my_certificate.pem
+./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output file:my_certificate.pem
 ```
 
 ### Generate a certificate and output it as JSON to stdout
 
 ```
-./generate_self_signed_cert.sh --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output json:my_cert
+./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output json:my_cert
 ```
 
 ### Generate a certificate and save it to AWS SSM Parameter Store
 
 ```
-./generate_self_signed_cert.sh --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output ssm:/my/parameter/name
+./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output ssm:/my/parameter/name
 ```
 
 ### Generate a certificate and post it to an HTTP endpoint
 
 ```
-./generate_self_signed_cert.sh --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output http://example.com/api/cert
+./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output http://example.com/api/cert
 ```
 
 ## License
