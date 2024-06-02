@@ -1,0 +1,478 @@
+#!/bin/bash
+
+# This script generates a self-signed certificate using an AWS KMS key.
+# The generated certificate can be saved to a local file, AWS SSM Parameter Store,
+# AWS Secrets Manager, S3 bucket, HTTP(S) endpoint, SQS, SNS, DynamoDB, or output as JSON.
+# The script supports RSA and ECC keys and dynamically selects the appropriate
+# signing algorithm based on the KMS key's specifications.
+# 
+# Required IAM Permissions:
+# - kms:DescribeKey
+# - kms:GetPublicKey
+# - kms:Sign
+# - ssm:GetParameter (if using SSM output or checking existing certificate)
+# - ssm:PutParameter (if using SSM output)
+# - secretsmanager:DescribeSecret (if using Secrets Manager output or checking existing certificate)
+# - secretsmanager:CreateSecret (if using Secrets Manager output)
+# - secretsmanager:UpdateSecret (if using Secrets Manager output)
+# - secretsmanager:GetSecretValue (if checking existing certificate from Secrets Manager)
+# - s3:PutObject (if using S3 output)
+# - s3:GetObject (if checking existing certificate from S3)
+# - sqs:SendMessage (if using SQS output)
+# - sns:Publish (if using SNS output)
+# - dynamodb:PutItem (if using DynamoDB output)
+
+# Function to print usage
+usage() {
+    cat <<EOF
+Usage: $0 --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [--validity-days <VALIDITY_DAYS>] [--output <OUTPUT_FORMAT>] [--cert-email <CERT_EMAIL>] [--cert-san <CERT_SAN>] [--google-play-store-spec]
+
+Required arguments:
+  --kms-key-id, -k          The ID of the KMS key to use for signing.
+  --cert-common-name, -c    The common name (CN) for the certificate.
+
+Optional arguments:
+  --validity-days, -v       The number of days the certificate is valid. Defaults to 9125 (25 years).
+  --output, -o              The name of the output file or the prefix '-', 'file:', 'http:', 'json:',
+                            'jsonfile:', 's3:', 's3:json:', 'secretsmanager:', 'secretsmanager:json:',
+                            'sns:', 'snsjson:', 'sqs:', 'sqsjson:', 'ssm:', 'ssm:json:', 'dynamodb:', 'dynamodbjson:'.
+                            Defaults to 'file:self_signed_certificate.pem'.
+  --cert-country            The country name (C) for the certificate.
+  --cert-state              The state or province name (ST) for the certificate.
+  --cert-locality           The locality or city name (L) for the certificate.
+  --cert-org                The organization name (O) for the certificate.
+  --cert-org-unit           The organizational unit name (OU) for the certificate.
+  --cert-email              The email address for the certificate.
+  --cert-san                The subject alternative name (SAN) for the certificate. This option can be repeated.
+  --google-play-store-spec  Ensure the key type is RSA for Google Play Store compatibility.
+
+Output options:
+  -                                        Output the certificate to stdout (not in JSON format).
+  file:<filename>                          Save the certificate to a local file. (Default)
+  http:<post_url>                          Post the certificate to a specified HTTP(S) endpoint.
+  http:<post_url>|<cert_key>               Post the certificate to a specified HTTP(S) endpoint,
+                                           optionally specifying a custom key name.
+  json:<cert_key>                          Output the certificate as a JSON object to stdout with the specified key.
+  jsonfile:<filename>                      Save the certificate as a JSON object to a local file.
+  jsonfile:<filename>|<cert_key>           Save the certificate as a JSON object to a local file,
+                                           optionally specifying a custom key name.
+  s3:<s3_region>|<s3_bucket>|<s3_key>      Save the certificate to an S3 bucket.
+  s3:json:<s3_region>|<s3_bucket>|<s3_key> Save the certificate as a JSON object to an S3 bucket.
+  s3:json:<s3_region>|<s3_bucket>|<s3_key>|<cert_key> Save the certificate as a JSON object to an S3 bucket,
+                                           optionally specifying a custom key name.
+  secretsmanager:<name>                    Save the certificate to AWS Secrets Manager.
+  secretsmanager:json:<name>               Save the certificate as a JSON object to AWS Secrets Manager.
+  secretsmanager:json:<name>|<cert_key>    Save the certificate as a JSON object to AWS Secrets Manager,
+                                           optionally specifying a custom key name.
+  sns:<topic_arn>                          Send the certificate to an SNS topic.
+  snsjson:<topic_arn>                      Send the JSON certificate to an SNS topic.
+  sqs:<queue_url>                          Send the certificate to an SQS queue.
+  sqsjson:<queue_url>                      Send the JSON certificate to an SQS queue.
+  ssm:<parameter>                          Save the certificate to AWS SSM Parameter Store as a SecureString.
+  ssm:json:<parameter>                     Save the certificate as a JSON object to AWS SSM Parameter Store.
+  ssm:json:<parameter>|<cert_key>          Save the certificate as a JSON object to AWS SSM Parameter Store,
+                                           optionally specifying a custom key name.
+  dynamodb:<table>|<payload_key>|<hash_key>|<hash_value>|<sort_key>|<sort_value> Save the certificate to a DynamoDB table.
+  dynamodbjson:<table>|<payload_key>|<hash_key>|<hash_value>|<sort_key>|<sort_value>|<cert_key> Save the JSON certificate to a DynamoDB table.
+EOF
+}
+
+# Function to handle errors
+handle_error() {
+    echo "Error: $1"
+    exit 1
+}
+
+# Default values for optional parameters
+VALIDITY_DAYS="${VALIDITY_DAYS:-9125}"  # 25 years
+OUTPUT_FORMAT="${OUTPUT_FORMAT:-file:self_signed_certificate.pem}"
+EXPIRY_THRESHOLD_DAYS=90
+GOOGLE_PLAY_STORE_SPEC=false
+CERT_SAN=()
+
+# Parse command line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --kms-key-id|-k)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                KMS_KEY_ID="${1#*=}"
+                shift
+            else
+                KMS_KEY_ID="$2"
+                shift 2
+            fi
+            ;;
+        --cert-common-name|-c)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                COMMON_NAME="${1#*=}"
+                shift
+            else
+                COMMON_NAME="$2"
+                shift 2
+            fi
+            ;;
+        --validity-days|-v)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                VALIDITY_DAYS="${1#*=}"
+                shift
+            else
+                VALIDITY_DAYS="$2"
+                shift 2
+            fi
+            ;;
+        --output|-o)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                OUTPUT_FORMAT="${1#*=}"
+                shift
+            else
+                OUTPUT_FORMAT="$2"
+                shift 2
+            fi
+            ;;
+        --cert-country)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                COUNTRY="${1#*=}"
+                shift
+            else
+                COUNTRY="$2"
+                shift 2
+            fi
+            ;;
+        --cert-state)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                STATE="${1#*=}"
+                shift
+            else
+                STATE="$2"
+                shift 2
+            fi
+            ;;
+        --cert-locality)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                LOCALITY="${1#*=}"
+                shift
+            else
+                LOCALITY="$2"
+                shift 2
+            fi
+            ;;
+        --cert-org)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                ORGANIZATION="${1#*=}"
+                shift
+            else
+                ORGANIZATION="$2"
+                shift 2
+            fi
+            ;;
+        --cert-org-unit)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                ORG_UNIT="${1#*=}"
+                shift
+            else
+                ORG_UNIT="$2"
+                shift 2
+            fi
+            ;;
+        --cert-email)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                CERT_EMAIL="${1#*=}"
+                shift
+            else
+                CERT_EMAIL="$2"
+                shift 2
+            fi
+            ;;
+        --cert-san)
+            CERT_SAN+=("$2")
+            shift 2
+            ;;
+        --google-play-store-spec)
+            GOOGLE_PLAY_STORE_SPEC=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown parameter passed: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Check if required parameters are provided
+if [ -z "$KMS_KEY_ID" ] || [ -z "$COMMON_NAME" ]; then
+    handle_error "Missing required parameters."
+    usage
+    exit 1
+fi
+
+# Function to check if OpenSSL is installed
+check_openssl() {
+    if ! command -v openssl &> /dev/null; then
+        handle_error "OpenSSL is required but not installed. Exiting."
+    fi
+}
+
+# Function to check if jq is installed
+check_jq() {
+    if ! command -v jq &> /dev/null; then
+        handle_error "jq is required but not installed. Exiting."
+    fi
+}
+
+# Function to check if curl is installed (only if using http output)
+check_curl() {
+    if [[ "$OUTPUT_FORMAT" == http* ]]; then
+        if ! command -v curl &> /dev/null; then
+            handle_error "curl is required for http output but not installed. Exiting."
+        fi
+    fi
+}
+
+# Function to create a temporary directory and ensure cleanup
+create_temp_dir() {
+    TEMP_DIR=$(mktemp -d)
+    trap "rm -rf $TEMP_DIR" EXIT
+}
+
+# Function to validate the key type for Google Play Store compatibility
+validate_google_play_store_spec() {
+    if $GOOGLE_PLAY_STORE_SPEC; then
+        echo "Validating Google Play Store specification..."
+        KEY_METADATA=$(aws kms describe-key --key-id "$KMS_KEY_ID") || handle_error "Failed to describe KMS key"
+        KEY_SPEC=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeySpec')
+        if [[ "$KEY_SPEC" != RSA_* ]]; then
+            handle_error "Google Play Store requires an RSA key. Current key type is $KEY_SPEC."
+        fi
+    fi
+}
+
+# Main script logic
+main() {
+    check_openssl
+    check_jq
+    check_curl
+    create_temp_dir
+
+    validate_google_play_store_spec
+
+    # Retrieve public key and key spec from AWS KMS
+    echo "Retrieving public key and key spec from AWS KMS..."
+    KEY_METADATA=$(aws kms describe-key --key-id "$KMS_KEY_ID") || handle_error "Failed to describe KMS key"
+    aws kms get-public-key --key-id "$KMS_KEY_ID" --output text --query PublicKey | base64 --decode > "$TEMP_DIR/kms_pubkey.der" || handle_error "Failed to get public key from KMS"
+    openssl pkey -inform DER -pubin -in "$TEMP_DIR/kms_pubkey.der" -out "$TEMP_DIR/public_key.pem" || handle_error "Failed to convert public key to PEM format"
+
+    KEY_SPEC=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeySpec')
+    KEY_USAGE=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeyUsage')
+
+    if [ "$KEY_USAGE" != "SIGN_VERIFY" ]; then
+        handle_error "The key must be used for SIGN_VERIFY"
+    fi
+
+    case "$KEY_SPEC" in
+        RSA_2048)
+            KEY_TYPE="RSA"
+            KEY_SIZE=2048
+            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
+            ;;
+        RSA_3072)
+            KEY_TYPE="RSA"
+            KEY_SIZE=3072
+            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
+            ;;
+        RSA_4096)
+            KEY_TYPE="RSA"
+            KEY_SIZE=4096
+            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
+            ;;
+        ECC_NIST_P256)
+            KEY_TYPE="ECC"
+            CURVE_NAME="prime256v1"
+            SIGN_ALG="ECDSA_SHA_256"
+            ;;
+        ECC_NIST_P384)
+            KEY_TYPE="ECC"
+            CURVE_NAME="secp384r1"
+            SIGN_ALG="ECDSA_SHA_384"
+            ;;
+        ECC_NIST_P521)
+            KEY_TYPE="ECC"
+            CURVE_NAME="secp521r1"
+            SIGN_ALG="ECDSA_SHA_512"
+            ;;
+        *)
+            handle_error "Unsupported key type"
+            ;;
+    esac
+
+    # Build the subject string for the certificate
+    SUBJ="/CN=$COMMON_NAME"
+    [ -n "$COUNTRY" ] && SUBJ="/C=$COUNTRY$SUBJ"
+    [ -n "$STATE" ] && SUBJ="/ST=$STATE$SUBJ"
+    [ -n "$LOCALITY" ] && SUBJ="/L=$LOCALITY$SUBJ"
+    [ -n "$ORGANIZATION" ] && SUBJ="/O=$ORGANIZATION$SUBJ"
+    [ -n "$ORG_UNIT" ] && SUBJ="/OU=$ORG_UNIT$SUBJ"
+    [ -n "$CERT_EMAIL" ] && SUBJ="$SUBJ/emailAddress=$CERT_EMAIL"
+
+    # Generate CSR using OpenSSL
+    echo "Generating CSR using OpenSSL..."
+    if [ "$KEY_TYPE" == "RSA" ]; then
+        openssl req -new -newkey rsa:$KEY_SIZE -nodes -keyout "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/csr.pem" -subj "$SUBJ"
+    elif [ "$KEY_TYPE" == "ECC" ]; then
+        openssl req -new -newkey ec:<(openssl ecparam -name $CURVE_NAME) -nodes -keyout "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/csr.pem" -subj "$SUBJ"
+    fi
+    if [ $? -ne 0 ]; then
+        handle_error "Failed to generate CSR"
+    fi
+
+    # Create a digest of the CSR
+    echo "Creating digest of the CSR..."
+    openssl dgst -sha256 -out "$TEMP_DIR/csr.sha256" "$TEMP_DIR/csr.pem"
+    if [ $? -ne 0 ]; then
+        handle_error "Failed to create digest of CSR"
+    fi
+
+    # Sign the digest using AWS KMS
+    echo "Signing the digest using AWS KMS..."
+    SIGNATURE=$(aws kms sign --key-id "$KMS_KEY_ID" --message fileb://"$TEMP_DIR/csr.sha256" --message-type RAW --signing-algorithm "$SIGN_ALG" --query 'Signature' --output text) || handle_error "Failed to sign the digest using AWS KMS"
+
+    # Decode the base64 signature
+    echo "Decoding the base64 signature..."
+    echo "$SIGNATURE" | base64 --decode > "$TEMP_DIR/csr.sig"
+    if [ $? -ne 0 ]; then
+        handle_error "Failed to decode the base64 signature"
+    fi
+
+    # Generate the self-signed certificate
+    echo "Generating the self-signed certificate..."
+    openssl x509 -req -days "$VALIDITY_DAYS" -in "$TEMP_DIR/csr.pem" -signkey "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/certificate.pem"
+    if [ $? -ne 0 ]; then
+        handle_error "Failed to generate self-signed certificate"
+    fi
+
+    # Combine the signed certificate with the public key
+    echo "Combining the signed certificate with the public key..."
+    CERT_PEM=$(cat "$TEMP_DIR/certificate.pem" "$TEMP_DIR/public_key.pem")
+
+    # Output or save the certificate as per the specified format
+    case "$OUTPUT_FORMAT" in
+        -)
+            echo "$CERT_PEM"
+            ;;
+        file:*)
+            FILENAME="${OUTPUT_FORMAT#file:}"
+            echo "$CERT_PEM" > "$FILENAME" || handle_error "Failed to save certificate to file"
+            ;;
+        http:*)
+            POST_URL="${OUTPUT_FORMAT#http:}"
+            curl -X POST -d "$CERT_PEM" "$POST_URL" || handle_error "Failed to post certificate to HTTP endpoint"
+            ;;
+        http:*|*)
+            POST_URL="${OUTPUT_FORMAT#http:}"
+            CERT_KEY="${POST_URL#*|}"
+            POST_URL="${POST_URL%%|*}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            curl -X POST -d "$JSON_PAYLOAD" "$POST_URL" || handle_error "Failed to post JSON certificate to HTTP endpoint"
+            ;;
+        json:*)
+            CERT_KEY="${OUTPUT_FORMAT#json:}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            echo "$JSON_PAYLOAD"
+            ;;
+        jsonfile:*)
+            FILENAME="${OUTPUT_FORMAT#jsonfile:}"
+            CERT_KEY="${FILENAME#*|}"
+            FILENAME="${FILENAME%%|*}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            echo "$JSON_PAYLOAD" > "$FILENAME" || handle_error "Failed to save JSON certificate to file"
+            ;;
+        s3:*)
+            S3_DETAILS="${OUTPUT_FORMAT#s3:}"
+            IFS='|' read -r S3_REGION S3_BUCKET S3_KEY <<< "$S3_DETAILS"
+            echo "$CERT_PEM" | aws s3 cp - "s3://${S3_BUCKET}/${S3_KEY}" --region "$S3_REGION" || handle_error "Failed to upload certificate to S3"
+            ;;
+        s3:json:*)
+            S3_DETAILS="${OUTPUT_FORMAT#s3:json:}"
+            IFS='|' read -r S3_REGION S3_BUCKET S3_KEY CERT_KEY <<< "$S3_DETAILS"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            echo "$JSON_PAYLOAD" | aws s3 cp - "s3://${S3_BUCKET}/${S3_KEY}" --region "$S3_REGION" || handle_error "Failed to upload JSON certificate to S3"
+            ;;
+        secretsmanager:*)
+            SECRET_NAME="${OUTPUT_FORMAT#secretsmanager:}"
+            if [[ "$OUTPUT_FORMAT" == secretsmanager:json:* ]]; then
+                SECRET_NAME="${OUTPUT_FORMAT#secretsmanager:json:}"
+                JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+                if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" &> /dev/null; then
+                    aws secretsmanager update-secret --secret-id "$SECRET_NAME" --secret-string "$JSON_PAYLOAD" || handle_error "Failed to update certificate in AWS Secrets Manager"
+                else
+                    aws secretsmanager create-secret --name "$SECRET_NAME" --secret-string "$JSON_PAYLOAD" || handle_error "Failed to create certificate in AWS Secrets Manager"
+                fi
+            else
+                if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" &> /dev/null; then
+                    aws secretsmanager update-secret --secret-id "$SECRET_NAME" --secret-string "$CERT_PEM" || handle_error "Failed to update certificate in AWS Secrets Manager"
+                else
+                    aws secretsmanager create-secret --name "$SECRET_NAME" --secret-string "$CERT_PEM" || handle_error "Failed to create certificate in AWS Secrets Manager"
+                fi
+            fi
+            ;;
+        sns:*)
+            SNS_TOPIC="${OUTPUT_FORMAT#sns:}"
+            aws sns publish --topic-arn "$SNS_TOPIC" --message "$CERT_PEM" || handle_error "Failed to send certificate to SNS topic"
+            ;;
+        snsjson:*)
+            SNS_TOPIC="${OUTPUT_FORMAT#snsjson:}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            aws sns publish --topic-arn "$SNS_TOPIC" --message "$JSON_PAYLOAD" || handle_error "Failed to send JSON certificate to SNS topic"
+            ;;
+        sqs:*)
+            SQS_QUEUE="${OUTPUT_FORMAT#sqs:}"
+            aws sqs send-message --queue-url "$SQS_QUEUE" --message-body "$CERT_PEM" || handle_error "Failed to send certificate to SQS queue"
+            ;;
+        sqsjson:*)
+            SQS_QUEUE="${OUTPUT_FORMAT#sqsjson:}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            aws sqs send-message --queue-url "$SQS_QUEUE" --message-body "$JSON_PAYLOAD" || handle_error "Failed to send JSON certificate to SQS queue"
+            ;;
+        ssm:*)
+            PARAMETER_NAME="${OUTPUT_FORMAT#ssm:}"
+            if [[ "$OUTPUT_FORMAT" == ssm:json:* ]]; then
+                PARAMETER_NAME="${OUTPUT_FORMAT#ssm:json:}"
+                JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+                if aws ssm get-parameter --name "$PARAMETER_NAME" &> /dev/null; then
+                    aws ssm put-parameter --name "$PARAMETER_NAME" --value "$JSON_PAYLOAD" --type "SecureString" --overwrite || handle_error "Failed to update certificate in SSM Parameter Store"
+                else
+                    aws ssm put-parameter --name "$PARAMETER_NAME" --value "$JSON_PAYLOAD" --type "SecureString" || handle_error "Failed to create certificate in SSM Parameter Store"
+                fi
+            else
+                if aws ssm get-parameter --name "$PARAMETER_NAME" &> /dev/null; then
+                    aws ssm put-parameter --name "$PARAMETER_NAME" --value "$CERT_PEM" --type "SecureString" --overwrite || handle_error "Failed to update certificate in SSM Parameter Store"
+                else
+                    aws ssm put-parameter --name "$PARAMETER_NAME" --value "$CERT_PEM" --type "SecureString" || handle_error "Failed to create certificate in SSM Parameter Store"
+                fi
+            fi
+            ;;
+        dynamodb:*)
+            DDB_DETAILS="${OUTPUT_FORMAT#dynamodb:}"
+            IFS='|' read -r TABLE_NAME PAYLOAD_KEY HASH_KEY HASH_VALUE SORT_KEY SORT_VALUE <<< "$DDB_DETAILS"
+            aws dynamodb put-item --table-name "$TABLE_NAME" --item "{\"$HASH_KEY\": {\"S\": \"$HASH_VALUE\"}, \"$SORT_KEY\": {\"S\": \"$SORT_VALUE\"}, \"$PAYLOAD_KEY\": {\"S\": \"$CERT_PEM\"}}" || handle_error "Failed to save certificate to DynamoDB"
+            ;;
+        dynamodbjson:*)
+            DDB_DETAILS="${OUTPUT_FORMAT#dynamodbjson:}"
+            IFS='|' read -r TABLE_NAME PAYLOAD_KEY HASH_KEY HASH_VALUE SORT_KEY SORT_VALUE CERT_KEY <<< "$DDB_DETAILS"
+            CERT_KEY="${CERT_KEY:-certificate}"
+            JSON_PAYLOAD=$(jq -n --arg cert "$CERT_PEM" --arg name "$CERT_KEY" '{"\($name)": $cert}')
+            aws dynamodb put-item --table-name "$TABLE_NAME" --item "{\"$HASH_KEY\": {\"S\": \"$HASH_VALUE\"}, \"$SORT_KEY\": {\"S\": \"$SORT_VALUE\"}, \"$PAYLOAD_KEY\": {\"S\": \"$JSON_PAYLOAD\"}}" || handle_error "Failed to save JSON certificate to DynamoDB"
+            ;;
+        *)
+            handle_error "Unsupported output format: $OUTPUT_FORMAT"
+            ;;
+    esac
+
+    echo "Self-signed certificate generated and saved: $OUTPUT_FORMAT"
+}
+
+main "$@"
