@@ -17,6 +17,13 @@ fi
 # Display certificate details
 openssl x509 -in "$1" -text -noout
 
+public_key_fingerprint=$(openssl x509 -in "$1" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 | awk '{print $2}')
+echo "Public Key SHA256 Fingerprint: $public_key_fingerprint"
+
+# Extract and display the SHA1 fingerprint (shasum)
+shasum256=$(openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d '=' -f 2 | tr -d ':')
+echo "Certificate SHA256 Fingerprint: $shasum256"
+
 # Check if certificate is expired
 echo -n "Certificate Expiry: "
 expiry_date=$(openssl x509 -enddate -noout -in "$1" | cut -d "=" -f 2)

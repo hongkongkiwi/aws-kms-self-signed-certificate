@@ -5,9 +5,11 @@
 # AWS Secrets Manager, S3 bucket, HTTP(S) endpoint, SQS, SNS, DynamoDB, or output as JSON.
 # The script supports RSA and ECC keys and dynamically selects the appropriate
 # signing algorithm based on the KMS key's specifications.
-# 
+#
+# PKCS11 support for KMS keys is achieved via: https://github.com/JackOfMostTrades/aws-kms-pkcs11
+# This library has a PR for MacOS support.
+#
 # Required IAM Permissions:
-# - kms:DescribeKey
 # - kms:GetPublicKey
 # - kms:Sign
 # - ssm:GetParameter (if using SSM output or checking existing certificate)
@@ -25,7 +27,7 @@
 # Function to print usage
 usage() {
     cat <<EOF
-Usage: $0 --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [--validity-days <VALIDITY_DAYS>] [--output <OUTPUT_FORMAT>] [--cert-email <CERT_EMAIL>] [--cert-san <CERT_SAN>]
+Usage: $0 --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> [--validity-days <VALIDITY_DAYS>] [--output <OUTPUT_FORMAT>] [--cert-email <CERT_EMAIL>] [--cert-san <CERT_SAN>] [--cert-serial <SERIAL_NUMBER>] [--cert-ca] [--pkcs11-debug] [--pkcs11-label <PKCS11_LABEL>] [--openssl-conf <OPENSSL_CONF>]
 
 Required arguments:
   --kms-key-id, -k          The ID of the KMS key to use for signing.
@@ -44,6 +46,11 @@ Optional arguments:
   --cert-org-unit           The organizational unit name (OU) for the certificate.
   --cert-email              The email address for the certificate.
   --cert-san                The subject alternative name (SAN) for the certificate. This option can be repeated.
+  --cert-serial             The serial number for the certificate. Defaults to 1.
+  --cert-ca                 Set the certificate as a Certificate Authority (CA). Defaults to false.
+  --pkcs11-debug            Enable AWS KMS PKCS11 debugging.
+  --pkcs11-label            The AWS KMS PKCS11 token label to use.
+  --openssl-conf            Path to the OpenSSL configuration file.
 
 Output options:
   -                                        Output the certificate to stdout (not in JSON format).
@@ -82,11 +89,21 @@ handle_error() {
     exit 1
 }
 
+# Function to log messages
+log_message() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - $1"
+}
+
 # Default values for optional parameters
 VALIDITY_DAYS="${VALIDITY_DAYS:-9125}"  # 25 years
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-file:self_signed_certificate.pem}"
 EXPIRY_THRESHOLD_DAYS=90
 CERT_SAN=()
+CERT_SERIAL=1
+CERT_CA=false
+PKCS11_DEBUG=false
+PKCS11_LABEL=""
+OPENSSL_CONF=""
 
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
@@ -185,6 +202,41 @@ while [[ "$#" -gt 0 ]]; do
             CERT_SAN+=("$2")
             shift 2
             ;;
+        --cert-serial)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                CERT_SERIAL="${1#*=}"
+                shift
+            else
+                CERT_SERIAL="$2"
+                shift 2
+            fi
+            ;;
+        --cert-ca)
+            CERT_CA=true
+            shift
+            ;;
+        --pkcs11-debug)
+            PKCS11_DEBUG=true
+            shift
+            ;;
+        --pkcs11-label)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                PKCS11_LABEL="${1#*=}"
+                shift
+            else
+                PKCS11_LABEL="$2"
+                shift 2
+            fi
+            ;;
+        --openssl-conf)
+            if [[ "$2" =~ ^- ]] || [[ "$2" == "" ]]; then
+                OPENSSL_CONF="${1#*=}"
+                shift
+            else
+                OPENSSL_CONF="$2"
+                shift 2
+            fi
+            ;;
         --help|-h)
             usage
             exit 0
@@ -203,6 +255,29 @@ if [ -z "$KMS_KEY_ID" ] || [ -z "$COMMON_NAME" ]; then
     usage
     exit 1
 fi
+
+# Check if OPENSSL_CONF exists, if not set to default
+if [ -n "$OPENSSL_CONF" ]; then
+    if [ ! -f "$OPENSSL_CONF" ]; then
+        handle_error "OpenSSL configuration file not found at $OPENSSL_CONF"
+    fi
+elif [ -z "$OPENSSL_CONF" ]; then
+    OPENSSL_CONF="${OPENSSL_CONF:-$HOME/.config/aws-kms-pkcs11/openssl_engine.conf}"
+    if [ ! -f "$OPENSSL_CONF" ]; then
+        handle_error "OpenSSL configuration file not found at $OPENSSL_CONF"
+    fi
+fi
+
+# Set PKCS11_DEBUG environment variable if enabled
+if [ "$PKCS11_DEBUG" = true ]; then
+    export AWS_KMS_PKCS11_DEBUG=1
+fi
+
+# Set PKCS11 token label if provided or use first 32 characters of KMS_KEY_ID
+if [ -z "$PKCS11_LABEL" ]; then
+    PKCS11_LABEL="${KMS_KEY_ID:0:32}"
+fi
+export AWS_KMS_PKCS11_TOKEN="$PKCS11_LABEL"
 
 # Function to check if OpenSSL is installed
 check_openssl() {
@@ -240,55 +315,6 @@ main() {
     check_curl
     create_temp_dir
 
-    # Retrieve public key and key spec from AWS KMS
-    echo "Retrieving public key and key spec from AWS KMS..."
-    KEY_METADATA=$(aws kms describe-key --key-id "$KMS_KEY_ID") || handle_error "Failed to describe KMS key"
-    aws kms get-public-key --key-id "$KMS_KEY_ID" --output text --query PublicKey | base64 --decode > "$TEMP_DIR/kms_pubkey.der" || handle_error "Failed to get public key from KMS"
-    openssl pkey -inform DER -pubin -in "$TEMP_DIR/kms_pubkey.der" -out "$TEMP_DIR/public_key.pem" || handle_error "Failed to convert public key to PEM format"
-
-    KEY_SPEC=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeySpec')
-    KEY_USAGE=$(echo "$KEY_METADATA" | jq -r '.KeyMetadata.KeyUsage')
-
-    if [ "$KEY_USAGE" != "SIGN_VERIFY" ]; then
-        handle_error "The key must be used for SIGN_VERIFY"
-    fi
-
-    case "$KEY_SPEC" in
-        RSA_2048)
-            KEY_TYPE="RSA"
-            KEY_SIZE=2048
-            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
-            ;;
-        RSA_3072)
-            KEY_TYPE="RSA"
-            KEY_SIZE=3072
-            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
-            ;;
-        RSA_4096)
-            KEY_TYPE="RSA"
-            KEY_SIZE=4096
-            SIGN_ALG="RSASSA_PKCS1_V1_5_SHA_256"
-            ;;
-        ECC_NIST_P256)
-            KEY_TYPE="ECC"
-            CURVE_NAME="prime256v1"
-            SIGN_ALG="ECDSA_SHA_256"
-            ;;
-        ECC_NIST_P384)
-            KEY_TYPE="ECC"
-            CURVE_NAME="secp384r1"
-            SIGN_ALG="ECDSA_SHA_384"
-            ;;
-        ECC_NIST_P521)
-            KEY_TYPE="ECC"
-            CURVE_NAME="secp521r1"
-            SIGN_ALG="ECDSA_SHA_512"
-            ;;
-        *)
-            handle_error "Unsupported key type"
-            ;;
-    esac
-
     # Build the subject string for the certificate
     SUBJ="/CN=$COMMON_NAME"
     [ -n "$COUNTRY" ] && SUBJ="/C=$COUNTRY$SUBJ"
@@ -298,45 +324,42 @@ main() {
     [ -n "$ORG_UNIT" ] && SUBJ="/OU=$ORG_UNIT$SUBJ"
     [ -n "$CERT_EMAIL" ] && SUBJ="$SUBJ/emailAddress=$CERT_EMAIL"
 
+    # Prepare SANs if provided
+    if [ ${#CERT_SAN[@]} -ne 0 ]; then
+        SAN_CONFIG="[SAN]\nsubjectAltName="
+        for SAN in "${CERT_SAN[@]}"; do
+            SAN_CONFIG="${SAN_CONFIG}DNS:$SAN,"
+        done
+        SAN_CONFIG="${SAN_CONFIG%,}" # Remove trailing comma
+        echo -e "$SAN_CONFIG" > "$TEMP_DIR/san.cnf"
+    fi
+
     # Generate CSR using OpenSSL
     echo "Generating CSR using OpenSSL..."
-    if [ "$KEY_TYPE" == "RSA" ]; then
-        openssl req -new -newkey rsa:$KEY_SIZE -nodes -keyout "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/csr.pem" -subj "$SUBJ"
-    elif [ "$KEY_TYPE" == "ECC" ]; then
-        openssl req -new -newkey ec:<(openssl ecparam -name $CURVE_NAME) -nodes -keyout "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/csr.pem" -subj "$SUBJ"
+    if [ ${#CERT_SAN[@]} -ne 0 ]; then
+        CERT_PEM="$(openssl req -x509 \
+            -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
+            -keyform "engine" \
+            -engine "pkcs11" \
+            -subj "$SUBJ" \
+            -days "$VALIDITY_DAYS" \
+            -config <(cat "$OPENSSL_CONF" "$TEMP_DIR/san.cnf") \
+            -extensions SAN \
+            -set_serial "$CERT_SERIAL" \
+            $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
+        || handle_error "Failed to generate self-signed certificate"
+    else
+        CERT_PEM="$(openssl req -x509 \
+            -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
+            -keyform "engine" \
+            -engine "pkcs11" \
+            -subj "$SUBJ" \
+            -days "$VALIDITY_DAYS" \
+            -config "$OPENSSL_CONF" \
+            -set_serial "$CERT_SERIAL" \
+            $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
+        || handle_error "Failed to generate self-signed certificate"
     fi
-    if [ $? -ne 0 ]; then
-        handle_error "Failed to generate CSR"
-    fi
-
-    # Create a digest of the CSR
-    echo "Creating digest of the CSR..."
-    openssl dgst -sha256 -out "$TEMP_DIR/csr.sha256" "$TEMP_DIR/csr.pem"
-    if [ $? -ne 0 ]; then
-        handle_error "Failed to create digest of CSR"
-    fi
-
-    # Sign the digest using AWS KMS
-    echo "Signing the digest using AWS KMS..."
-    SIGNATURE=$(aws kms sign --key-id "$KMS_KEY_ID" --message fileb://"$TEMP_DIR/csr.sha256" --message-type RAW --signing-algorithm "$SIGN_ALG" --query 'Signature' --output text) || handle_error "Failed to sign the digest using AWS KMS"
-
-    # Decode the base64 signature
-    echo "Decoding the base64 signature..."
-    echo "$SIGNATURE" | base64 --decode > "$TEMP_DIR/csr.sig"
-    if [ $? -ne 0 ]; then
-        handle_error "Failed to decode the base64 signature"
-    fi
-
-    # Generate the self-signed certificate
-    echo "Generating the self-signed certificate..."
-    openssl x509 -req -days "$VALIDITY_DAYS" -in "$TEMP_DIR/csr.pem" -signkey "$TEMP_DIR/temp_private_key.pem" -out "$TEMP_DIR/certificate.pem"
-    if [ $? -ne 0 ]; then
-        handle_error "Failed to generate self-signed certificate"
-    fi
-
-    # Combine the signed certificate with the public key
-    echo "Combining the signed certificate with the public key..."
-    CERT_PEM=$(cat "$TEMP_DIR/certificate.pem" "$TEMP_DIR/public_key.pem")
 
     # Output or save the certificate as per the specified format
     case "$OUTPUT_FORMAT" in
