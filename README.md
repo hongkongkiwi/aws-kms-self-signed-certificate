@@ -2,6 +2,8 @@
 
 This script generates a self-signed certificate using an AWS KMS key. The generated certificate can be saved to a local file, AWS SSM Parameter Store, AWS Secrets Manager, S3 bucket, HTTP(S) endpoint, SQS, SNS, DynamoDB, or output as JSON. The script supports RSA and ECC keys and dynamically selects the appropriate signing algorithm based on the KMS key's specifications.
 
+**Note:** This script requires AWS KMS PKCS11 from [https://github.com/JackOfMostTrades/aws-kms-pkcs11](https://github.com/JackOfMostTrades/aws-kms-pkcs11).
+
 ## Table of Contents
 
 - [Self-Signed Certificate Generator Using AWS KMS](#self-signed-certificate-generator-using-aws-kms)
@@ -18,6 +20,7 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
     - [Generate a certificate and output it as JSON to stdout](#generate-a-certificate-and-output-it-as-json-to-stdout)
     - [Generate a certificate and save it to AWS SSM Parameter Store](#generate-a-certificate-and-save-it-to-aws-ssm-parameter-store)
     - [Generate a certificate and post it to an HTTP endpoint](#generate-a-certificate-and-post-it-to-an-http-endpoint)
+  - [Additional Utility Scripts](#additional-utility-scripts)
   - [License](#license)
 
 ## Features
@@ -36,7 +39,6 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 
 ## Required IAM Permissions
 
-- `kms:DescribeKey`
 - `kms:GetPublicKey`
 - `kms:Sign`
 - `ssm:GetParameter` (if using SSM output)
@@ -73,6 +75,11 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 - `--cert-org-unit`: The organizational unit name (OU) for the certificate.
 - `--cert-email`: The email address for the certificate.
 - `--cert-san`: The subject alternative name (SAN) for the certificate. This option can be repeated.
+- `--cert-serial`: The serial number for the certificate. Defaults to 1.
+- `--cert-ca`: Set the certificate as a Certificate Authority (CA). Defaults to false.
+- `--pkcs11-debug`: Enable PKCS11 debugging.
+- `--pkcs11-label`: The PKCS11 token label to use.
+- `--openssl-conf`: Path to the OpenSSL configuration file.
 
 ### Output Options
 
@@ -124,6 +131,17 @@ This script generates a self-signed certificate using an AWS KMS key. The genera
 ```
 ./generate_self_signed_cert --kms-key-id <KMS_KEY_ID> --cert-common-name <CERT_COMMON_NAME> --output http://example.com/api/cert
 ```
+
+## Additional Utility Scripts
+
+The following utility scripts are included to help in dealing with certificates and KMS:
+
+- `extract_public_key_from_cert`: Extracts the public key from a certificate.
+- `extract_public_key_from_kms`: Extracts the public key from a KMS key.
+- `extract_public_key_sha256sum`: Extracts the SHA256 checksum of a public key.
+- `verify_cert_public_key_file`: Verifies that a certificate's public key matches a given public key file.
+- `verify_cert_public_key_kms`: Verifies that a certificate's public key matches a given KMS key.
+- `view_cert_info`: Displays information about a certificate.
 
 ## License
 
