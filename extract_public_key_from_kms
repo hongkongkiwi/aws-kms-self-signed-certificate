@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Check if key id is provided
+KEY_ID="${1-}"
+[ -n "$KEY_ID" ] || { echo >&2 "ERROR: Key ID not provided"; exit 1; }
+
+# Pull down the public key from AWS KMS and convert it to PEM format
+PUBLIC_KEY_PEM=$(aws kms get-public-key --key-id "$KEY_ID" --query 'PublicKey' --output text 2>/dev/null | base64 -d | openssl pkey -pubin -inform DER -outform PEM 2>/dev/null)
+if [ -z "$PUBLIC_KEY_PEM" ]; then
+    echo >&2 "ERROR: Failed to retrieve public key from AWS KMS or key not found"
+    exit 1
+fi
+
+# Determine key type
+if echo "$PUBLIC_KEY_PEM" | openssl rsa -pubin -noout -inform PEM >/dev/null 2>&1; then
+    KEY_TYPE="rsa"
+elif echo "$PUBLIC_KEY_PEM" | openssl ec -pubin -noout -inform PEM >/dev/null 2>&1; then
+    KEY_TYPE="ec"
+else
+    echo >&2 "ERROR: Unsupported key type"
+    exit 1
+fi
+
+# Define default output file if not provided
+OUT_FILE="${2-"kms_${KEY_TYPE}_public_key.pem"}"
+
+# Write public key to PEM file
+echo "$PUBLIC_KEY_PEM" > "$OUT_FILE"
+
+# Check if public key extraction was successful
+if [ $? -eq 0 ]; then
+    echo "Public key extracted successfully and saved to $OUT_FILE"
+else
+    echo >&2 "ERROR: Failed to extract public key"
+    exit 1
+fi

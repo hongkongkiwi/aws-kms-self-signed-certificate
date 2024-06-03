@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Check if certificate file is provided
+[ -f "${1-}" ] || { echo >&2 "ERROR: Certificate file not found"; exit 1; }
+
+# Define default output file if not provided
+OUT_FILE="${2:-"public_key.pem"}"
+
+# Extract public key from certificate
+openssl x509 -in "$1" -pubkey -noout > "$OUT_FILE"
+
+# Check if extraction was successful
+if [ $? -eq 0 ]; then
+    echo "Public key extracted successfully and saved to $OUT_FILE"
+else
+    echo >&2 "ERROR: Failed to extract public key"
+    exit 1
+fi

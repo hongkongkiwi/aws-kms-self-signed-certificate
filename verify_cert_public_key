@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check if openssl command exists
+if ! command_exists openssl; then
+    echo >&2 "ERROR: openssl command not found"
+    exit 255
+fi
+
+# Check if diff command exists
+if ! command_exists diff; then
+    echo >&2 "ERROR: diff command not found"
+    exit 255
+fi
+
+# Check if certificate file is provided
+[ -f "${1-}" ] || { echo >&2 "ERROR: Certificate file not found"; exit 255; }
+
+# Check if public key file is provided
+[ -f "${2-}" ] || { echo >&2 "ERROR: Public key file not found"; exit 255; }
+
+# Function to check if a file is a valid certificate
+is_certificate() {
+    openssl x509 -in "$1" -noout 2>/dev/null
+}
+
+# Function to check if a file is a valid public key
+is_public_key() {
+    if openssl rsa -in "$1" -pubin -outform PEM 2>1 >/dev/null; then
+        return 0
+    elif openssl ec -in "$1" -pubin -outform PEM 2>1 >/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Validate certificate
+if ! is_certificate "$1"; then
+    echo >&2 "ERROR: $1 is not a valid certificate"
+    exit 2
+fi
+
+# Validate public key
+if ! is_public_key "$2"; then
+    echo >&2 "ERROR: $2 is not a valid public key"
+    exit 3
+fi
+
+# Extract public key from certificate and compare with public key file
+diff -q <(openssl x509 -pubkey -noout -in "$1") "$2" > /dev/null
+
+# Check if the keys are identical
+if [ $? -eq 0 ]; then
+    echo "The certificate has been signed with the provided public key."
+    exit 0
+else
+    echo "WARN: The certificate has NOT been signed with the provided public key."
+    exit 1
+fi

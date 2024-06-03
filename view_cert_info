@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check if openssl command exists
+if ! command_exists openssl; then
+    echo >&2 "ERROR: openssl command not found"
+    exit 1
+fi
+
+# Check if certificate file is provided
+[ -f "$1" ] || { echo >&2 "ERROR: Certificate file not found"; exit 1; }
+
+# Display certificate details
+openssl x509 -in "$1" -text -noout
+
+# Check if certificate is expired
+echo -n "Certificate Expiry: "
+expiry_date=$(openssl x509 -enddate -noout -in "$1" | cut -d "=" -f 2)
+if [[ "$(uname)" == "Darwin" ]]; then
+    expiry_timestamp=$(date -jf "%b %d %T %Y %Z" "$expiry_date" +%s)
+else
+    expiry_timestamp=$(date -d "$expiry_date" +%s)
+fi
+current_timestamp=$(date +%s)
+if [ $expiry_timestamp -lt $current_timestamp ]; then
+    echo "Expired"
+    certificate_expired="Yes"
+else
+    echo "Valid until $expiry_date"
+    certificate_expired="No"
+fi
+
+# Output whether certificate is expired or not
+echo "Certificate Expired: $certificate_expired"
+
+# Check if certificate is self-signed
+issuer_subject_info=$(openssl x509 -in "$1" -noout -issuer -subject -issuer_hash -subject_hash)
+issuer=$(echo "$issuer_subject_info" | grep "Issuer:" | awk '{print $2}')
+subject=$(echo "$issuer_subject_info" | grep "Subject:" | awk '{print $2}')
+issuer_hash=$(echo "$issuer_subject_info" | grep "ihash:" | awk '{print $2}')
+subject_hash=$(echo "$issuer_subject_info" | grep "shash:" | awk '{print $2}')
+if [ "$issuer" == "$subject" ] && [ "$issuer_hash" == "$subject_hash" ]; then
+    echo "Self-Signed: Yes"
+else
+    echo "Self-Signed: No"
+fi
