@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Function to print script usage
+print_usage() {
+    echo "Usage: $0 [OPTIONS] <KMS_KEY_ID> <CERTIFICATE_FILE>"
+    echo "Options:"
+    echo "  -h, --help           Display this help message"
+    echo "  -q, --quiet          Suppress output"
+    exit 1
+}
+
+# Function to log messages
+log() {
+    if [ "$QUIET" != "true" ]; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - $1" >&2
+    fi
+}
+
+# Function to retrieve the public key from AWS KMS and convert it to PEM format
+retrieve_kms_public_key() {
+    local key_id="$1"
+    log "Retrieving public key from AWS KMS for key ID: $key_id"
+    local public_key_pem
+    public_key_pem=$(aws kms get-public-key --key-id "$key_id" --query 'PublicKey' --output text 2>/dev/null | base64 -d | openssl pkey -pubin -inform DER -outform PEM 2>/dev/null)
+    if [ -z "$public_key_pem" ]; then
+        log "ERROR: Failed to retrieve public key from AWS KMS or key not found"
+        exit 1
+    fi
+    log "Public key retrieved successfully"
+    echo "$public_key_pem"
+}
+
+# Function to check if a string is a valid public key
+is_valid_public_key() {
+    local key_pem="$1"
+    if echo "$key_pem" | openssl rsa -pubin -noout -inform PEM >/dev/null 2>&1; then
+        return 0
+    elif echo "$key_pem" | openssl ec -pubin -noout -inform PEM >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Main function to validate the certificate with the extracted KMS public key
+validate_certificate_with_kms_public_key() {
+    local key_id="$1"
+    local cert_file="$2"
+
+    # Check if certificate file exists
+    [ -f "$cert_file" ] || { echo >&2 "ERROR: invalid cert file \"$cert_file\""; exit 255; }
+
+    log "Validating certificate with KMS public key"
+
+    # Retrieve public key from AWS KMS and convert to PEM format
+    local public_key_pem
+    public_key_pem=$(retrieve_kms_public_key "$key_id")
+
+    # Validate public key format
+    if ! is_valid_public_key "$public_key_pem"; then
+        log "ERROR: Invalid public key format"
+        exit 1
+    fi
+
+    # Extract public key from certificate
+    local cert_public_key
+    cert_public_key=$(openssl x509 -in "$cert_file" -pubkey -noout 2>/dev/null)
+
+    # Compare the extracted public key from KMS with the public key from the certificate
+    if [ "$public_key_pem" = "$cert_public_key" ]; then
+        log "The certificate has been signed with the provided public key."
+        exit 0
+    else
+        log "WARN: The certificate has NOT been signed with the provided public key."
+        exit 1
+    fi
+}
+
+# Set default values
+QUIET=false
+
+# Check if required commands are available
+for cmd in aws base64 openssl; do
+    if ! command -v "$cmd" >/dev/null; then
+        echo >&2 "ERROR: Required command '$cmd' not found"
+        exit 1
+    fi
+done
+
+# Parse command-line options
+options=("$@")
+for ((i = 0; i < ${#options[@]}; i++)); do
+    case "${options[i]}" in
+        "-h"|"--help") print_usage; exit 255;;
+        "-q"|"--quiet") QUIET=true; unset "options[$i]";;
+        *) ;;
+    esac
+done
+set -- "${options[@]}"
+
+# Check if certificate file and KMS key ID are provided
+if [ $# -lt 2 ]; then
+    echo >&2 "ERROR: Certificate file or KMS key ID not provided"
+    print_usage
+fi
+
+# Validate certificate with the extracted KMS public key
+validate_certificate_with_kms_public_key "$@"
