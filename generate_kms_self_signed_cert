@@ -337,27 +337,30 @@ main() {
     # Generate CSR using OpenSSL
     echo "Generating CSR using OpenSSL..."
     if [ ${#CERT_SAN[@]} -ne 0 ]; then
-        CERT_PEM="$(openssl req -x509 \
-            -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
-            -keyform "engine" \
-            -engine "pkcs11" \
-            -subj "$SUBJ" \
-            -days "$VALIDITY_DAYS" \
-            -config <(cat "$OPENSSL_CONF" "$TEMP_DIR/san.cnf") \
-            -extensions SAN \
-            -set_serial "$CERT_SERIAL" \
-            $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
+        cat "$OPENSSL_CONF" "$TEMP_DIR/san.cnf" > "$TEMP_DIR/openssl.cnf"
+
+        CERT_PEM="$(OPENSSL_CONF="$TEMP_DIR/openssl.cnf" \
+            openssl req -x509 \
+                -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
+                -keyform "engine" \
+                -engine "pkcs11" \
+                -subj "$SUBJ" \
+                -days "$VALIDITY_DAYS" \
+                -extensions SAN \
+                -set_serial "$CERT_SERIAL" \
+                $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
         || handle_error "Failed to generate self-signed certificate"
     else
-        CERT_PEM="$(openssl req -x509 \
-            -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
-            -keyform "engine" \
-            -engine "pkcs11" \
-            -subj "$SUBJ" \
-            -days "$VALIDITY_DAYS" \
-            -config "$OPENSSL_CONF" \
-            -set_serial "$CERT_SERIAL" \
-            $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
+        echo "Normal cert"
+        CERT_PEM="$(OPENSSL_CONF="$OPENSSL_CONF" \
+            openssl req -x509 \
+                -key "pkcs11:token=$AWS_KMS_PKCS11_TOKEN" \
+                -keyform "engine" \
+                -engine "pkcs11" \
+                -subj "$SUBJ" \
+                -days "$VALIDITY_DAYS" \
+                -set_serial "$CERT_SERIAL" \
+                $( [ "$CERT_CA" = true ] && echo "-addext basicConstraints=critical,CA:TRUE" || echo "-addext basicConstraints=critical,CA:FALSE" ))" \
         || handle_error "Failed to generate self-signed certificate"
     fi
 
